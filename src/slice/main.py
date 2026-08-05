@@ -38,7 +38,7 @@ def main():
 █████▀ ██▄▄▄ ██ ▀████ ██▄▄▄
                                 [/bold cyan]""")
     console.print("[cyan]" + "─" * 64 + "[/cyan]")
-    console.print("[cyan]v1.5.0 - Skills & Enhanced Conversions[/cyan]")
+    console.print("[cyan]v1.5.1 - Skills & Enhanced Conversions[/cyan]")
     console.print()
     console.print("[cyan]💡 Tips:[/cyan]")
     console.print("[cyan]  • Type /model to switch models during your session[/cyan]")

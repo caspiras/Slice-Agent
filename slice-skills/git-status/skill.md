@@ -1,5 +1,4 @@
 ---
-name: status
 description: Show git repository status and recent commits
 ---
 

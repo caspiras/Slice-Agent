@@ -236,8 +236,8 @@ class ChatUI:
         # Save conversation history
         old_history = self.session.conversation_history.copy()
 
-        # Create new session with selected model
-        self.session = ChatSession(selected_model, safe_directory=self.safe_directory)
+        # Create new session with selected model, preserving skill_loader
+        self.session = ChatSession(selected_model, safe_directory=self.safe_directory, skill_loader=self.session.skill_loader)
 
         # Restore conversation history to new session
         self.session.conversation_history = old_history

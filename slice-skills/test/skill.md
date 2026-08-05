@@ -1,5 +1,4 @@
 ---
-name: test
 description: A simple test skill to verify skills functionality
 ---
 

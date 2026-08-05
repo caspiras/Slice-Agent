@@ -1,5 +1,4 @@
 ---
-name: hello
 description: Say hello and display system information
 ---
 
