@@ -12,13 +12,20 @@ Slice is a beautiful terminal IDE that wraps local Ollama models with practical 
 
 ## 🆕 What's New in v1.5.1
 
-- **🎯 Skills System** - Create custom slash commands with predefined instructions
+- **📁 Folder-Based Skills** - Skills now use a folder-per-skill layout
   - Each skill is a folder inside `slice-skills/` containing a `skill.md` file
   - Folder name = invocation name (e.g., `slice-skills/deploy/skill.md` → `/deploy`)
-  - Invoke with `/skill-name` for common workflows
   - Example skills included: `/test`, `/hello`, `/git-status`
+- **🐛 Bug Fix** - Skills now persist when switching models with `/model`
 
 ### Previous Updates
+
+### v1.5.0
+
+- **🎯 Skills System** - Create custom slash commands with predefined instructions
+  - Define skills in `slice-skills/` directory
+  - Invoke with `/skill-name` for common workflows
+  - Full documentation in `slice-skills/README.md`
 
 ### v1.4.0
 
