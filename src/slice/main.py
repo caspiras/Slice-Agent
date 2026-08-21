@@ -38,14 +38,16 @@ def main():
 █████▀ ██▄▄▄ ██ ▀████ ██▄▄▄
                                 [/bold cyan]""")
     console.print("[cyan]" + "─" * 64 + "[/cyan]")
-    console.print("[cyan]v1.5.1 - Skills & Enhanced Conversions[/cyan]")
+    console.print("[cyan]v1.6.0 - Project Instructions & Web Access[/cyan]")
     console.print()
     console.print("[cyan]💡 Tips:[/cyan]")
     console.print("[cyan]  • Type /model to switch models during your session[/cyan]")
     console.print("[cyan]  • Press Ctrl+C once to interrupt generation, twice to exit[/cyan]")
     console.print("[cyan]  • Press Ctrl+Z to completely stop the process and exit[/cyan]")
     console.print()
-    console.print("[dim]Different models have different strengths. Choose based on your task:[/dim]")
+    console.print(
+        "[dim]Different models have different strengths. Choose based on your task:[/dim]"
+    )
     console.print("[dim]  • Code tasks: Models trained for tool use work best[/dim]")
     console.print("[dim]  • Mixed chat/actions: Try gemma4, mistral, or qwen2[/dim]")
     console.print()
@@ -67,10 +69,25 @@ def main():
 
     # Display loaded skills if any
     if skill_loader.has_skills():
-        console.print(f"[cyan]✓ Loaded {len(loaded_skills)} skill(s): {', '.join(f'/{name}' for name in skill_loader.list_skill_names())}[/cyan]")
+        console.print(
+            f"[cyan]✓ Loaded {len(loaded_skills)} skill(s): {', '.join(f'/{name}' for name in skill_loader.list_skill_names())}[/cyan]"
+        )
         console.print()
 
     session = ChatSession(selected_model, safe_directory=safe_dir, skill_loader=skill_loader)
+
+    # Confirm per-project instructions (SLICE.md) were loaded, or hint how to add them
+    if session.has_project_instructions:
+        console.print(
+            f"[cyan]✓ Loaded project instructions from {ChatSession.PROJECT_INSTRUCTIONS_FILE}[/cyan]"
+        )
+        console.print()
+    else:
+        console.print(
+            f"[dim]💡 Tip: create a {ChatSession.PROJECT_INSTRUCTIONS_FILE} file to give the model "
+            "persistent project instructions[/dim]"
+        )
+        console.print()
 
     # Start chat UI
     chat_ui = ChatUI(session, safe_directory=safe_dir)

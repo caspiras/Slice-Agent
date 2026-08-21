@@ -10,15 +10,28 @@
 
 Slice is a beautiful terminal IDE that wraps local Ollama models with practical coding tools. Built with **Python** and the **Rich** library, it provides streaming chat, code editing with diffs, document operations, and git integration - all sandboxed to your project directory.
 
-## 🆕 What's New in v1.5.1
+## 🆕 What's New in v1.6.0
+
+- **📋 Project Instructions (SLICE.md)** - Give the model persistent, project-specific guidance
+  - Create a `SLICE.md` file in your project directory with standing instructions
+  - Loaded automatically as soon as you pick a model, and applied to every task in the session
+  - **Auto-reloads** - edit `SLICE.md` while Slice is running and the changes take effect on your
+    next prompt (no restart), and it re-syncs across `/model` switches too
+  - Great for running the model like an agent with precise, standing instructions
+- **🌐 Web Access (fetch_url)** - Review web pages from your prompt
+  - Ask Slice to read, review, or summarize a URL and it fetches the page (with your approval)
+  - Permission-gated like every other action; HTTP and HTTPS supported
+- **🔒 Local-first** - Uses Python's standard library for fetching (no heavy new dependencies)
+
+### Previous Updates
+
+### v1.5.1
 
 - **📁 Folder-Based Skills** - Skills now use a folder-per-skill layout
   - Each skill is a folder inside `slice-skills/` containing a `skill.md` file
   - Folder name = invocation name (e.g., `slice-skills/deploy/skill.md` → `/deploy`)
   - Example skills included: `/test`, `/hello`, `/git-status`
 - **🐛 Bug Fix** - Skills now persist when switching models with `/model`
-
-### Previous Updates
 
 ### v1.5.0
 
@@ -71,6 +84,8 @@ Slice brings IDE-like capabilities to local Ollama models through a permission-g
 - 💬 **Natural conversation** - Ask questions, discuss code, get explanations
 - ✏️ **Code editing with diffs** - Propose changes, review side-by-side diffs, apply with approval
 - 📄 **Universal document editing** - Read/write PDF, Word, Excel, PowerPoint, CSV, Markdown, and ANY text-based file
+- 📋 **Project instructions** - Drop a `SLICE.md` in your project for persistent, auto-reloading guidance
+- 🌐 **Web access** - Ask it to review or summarize a URL; fetches the page with your approval
 - 🔧 **Bash execution** - Run commands after approval
 - 🌳 **Git integration** - Stage, commit, create branches (never auto-pushes)
 - 🔒 **Directory sandboxing** - All operations confined to current directory
@@ -142,7 +157,7 @@ slice
 
 ## Skills - Custom Slash Commands
 
-Slice v1.5.1 introduces **skills** - custom slash commands that provide the AI with predefined instructions for common tasks.
+Slice includes **skills** - custom slash commands that provide the AI with predefined instructions for common tasks.
 
 ### What are Skills?
 
@@ -403,7 +418,7 @@ ruff check src/
 
 ## Features
 
-- 🎯 **Skills System** (NEW in v1.5.1)
+- 🎯 **Skills System**
   - Create custom slash commands with predefined instructions
   - Each skill is a folder inside `slice-skills/` containing a `skill.md` file
   - Folder name = invocation name (e.g., `slice-skills/deploy/skill.md` → `/deploy`)

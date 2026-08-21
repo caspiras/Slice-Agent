@@ -5,6 +5,11 @@ import signal
 import os
 import json
 import difflib
+import re
+import html
+import ssl
+import urllib.request
+import urllib.error
 from pathlib import Path
 from rich.console import Console
 from rich.live import Live
@@ -162,6 +167,23 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch and read the text content of a web page or URL (http:// or https://). Use this whenever the user asks you to review, read, summarize, check, or look at a URL, link, or web page. Returns the page text. Requires user permission before fetching. DO NOT say you cannot access URLs - call this tool instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full http:// or https:// URL to fetch",
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 
@@ -171,6 +193,8 @@ class ChatSession:
     # Constants
     MAX_DOCUMENT_CHARS = 100000  # ~100KB max for document content
     CSV_CHUNK_SIZE = 10000  # Process CSV files in 10k row chunks
+    URL_FETCH_TIMEOUT = 30  # Timeout in seconds for fetching a URL
+    PROJECT_INSTRUCTIONS_FILE = "SLICE.md"  # Auto-loaded per-project instructions
 
     def __init__(self, model_name: str, safe_directory: str, skill_loader=None):
         self.model_name = model_name
@@ -199,6 +223,7 @@ class ChatSession:
                     "- read_document tool - Reads Office documents and text files\n"
                     "- write_document tool - Writes Office documents ONLY (Word, Excel, PDF, PowerPoint, CSV)\n"
                     "- edit_code tool - Edits existing source code files\n"
+                    "- fetch_url tool - Fetches/reads the contents of a web page or URL\n"
                     "IMPORTANT: You can call MULTIPLE tools in a SINGLE response. For example, call bash twice to create and then run a file.\n\n"
                     "CRITICAL - Action vs. Explanation:\n"
                     "- When user asks you to CREATE, MAKE, BUILD, WRITE, RUN, or EXECUTE something → CALL THE TOOL NOW\n"
@@ -280,6 +305,11 @@ class ChatSession:
                     "- NEVER try to create empty document files (Excel, Word, PowerPoint, PDF) with touch - they need proper structure\n"
                     "- To create new document files, use write_document with operations (it will create the file with proper structure)\n"
                     "- Multi-file search: use bash with grep -r, find, or other search tools\n\n"
+                    "Web / URL access (use fetch_url tool - requires user approval via permission prompt):\n"
+                    "- When the user gives you a URL or asks you to review, read, summarize, or check a web page, CALL fetch_url with that URL\n"
+                    "- NEVER say you cannot access the internet or URLs - you CAN, via the fetch_url tool (the user approves each fetch)\n"
+                    "- Only http:// and https:// URLs are supported\n"
+                    "- After fetching, summarize or answer based on the returned page text\n\n"
                     "Language:\n"
                     "- Always respond in English unless the user writes to you in another language\n\n"
                     "Formatting guidelines:\n"
@@ -289,6 +319,91 @@ class ChatSession:
                 ),
             }
         ]
+
+        # Load per-project instructions from SLICE.md (if present) as a second
+        # system message. This gives the model persistent, project-specific
+        # guidance as soon as the session starts (like CLAUDE.md for Claude Code).
+        # The instructions are auto-reloaded when the file changes (see
+        # refresh_project_instructions), so editing SLICE.md mid-session takes
+        # effect on the next prompt without a restart.
+        self.has_project_instructions = False
+        self._project_instructions_text = ""  # last-synced SLICE.md content
+        self.refresh_project_instructions()
+
+    def _project_instructions_header(self) -> str:
+        """The fixed prefix prepended to SLICE.md content in the system message.
+
+        Also used to locate the instruction message in the conversation history,
+        so building and detection can never drift apart.
+        """
+        return (
+            "The user has provided project-specific instructions in a file named "
+            f"{self.PROJECT_INSTRUCTIONS_FILE}. Treat these as authoritative guidance "
+            "for how to work in this project, and follow them carefully:\n\n"
+        )
+
+    def _read_project_instructions(self) -> str:
+        """Read SLICE.md from the sandbox directory, if it exists.
+
+        Returns the file's text content, or an empty string when the file is
+        absent or unreadable. Never raises - a missing/broken SLICE.md must not
+        prevent a session from starting.
+        """
+        path = os.path.join(self.safe_directory, self.PROJECT_INSTRUCTIONS_FILE)
+        try:
+            if not os.path.isfile(path):
+                return ""
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return ""
+
+    def refresh_project_instructions(self, force: bool = False) -> None:
+        """Reload SLICE.md and sync the injected system message in place.
+
+        Handles create / edit / delete of SLICE.md between calls. Safe to call
+        every turn - it does nothing when the content is unchanged (unless
+        force=True, used after a model switch where the copied history may carry
+        a stale copy of the instructions).
+        """
+        text = self._read_project_instructions()
+
+        if not force and text == self._project_instructions_text:
+            return
+
+        # Locate an existing SLICE.md system message by its fixed header prefix.
+        header = self._project_instructions_header()
+        idx = None
+        for i, msg in enumerate(self.conversation_history):
+            if (
+                msg.get("role") == "system"
+                and isinstance(msg.get("content"), str)
+                and msg["content"].startswith(header)
+            ):
+                idx = i
+                break
+
+        if text:
+            new_msg = {"role": "system", "content": header + text}
+            if idx is not None:
+                self.conversation_history[idx] = new_msg
+            else:
+                # Insert right after the base system message (index 0), if any.
+                insert_at = (
+                    1
+                    if self.conversation_history
+                    and self.conversation_history[0].get("role") == "system"
+                    else 0
+                )
+                self.conversation_history.insert(insert_at, new_msg)
+            self.has_project_instructions = True
+        else:
+            # SLICE.md was removed or emptied - drop the instruction message.
+            if idx is not None:
+                del self.conversation_history[idx]
+            self.has_project_instructions = False
+
+        self._project_instructions_text = text
 
     def _execute_command(self, command: str) -> str:
         """Execute a command with user permission."""
@@ -330,7 +445,7 @@ class ChatSession:
                         f"[yellow]⚠️  Large document ({len(content)} chars) - truncating to first {self.MAX_DOCUMENT_CHARS} chars[/yellow]"
                     )
                     content = (
-                        content[:self.MAX_DOCUMENT_CHARS]
+                        content[: self.MAX_DOCUMENT_CHARS]
                         + f"\n\n[... truncated {len(content) - self.MAX_DOCUMENT_CHARS} additional characters ...]"
                     )
 
@@ -665,14 +780,112 @@ class ChatSession:
             f"Successfully converted {len(reader.pages)} pages from PDF to Markdown: {output_path}"
         )
 
+    def _html_to_text(self, raw_html: str) -> str:
+        """Convert HTML to readable plain text (dependency-free).
+
+        Strips <script>/<style> blocks, removes remaining tags, unescapes
+        HTML entities, and collapses excess whitespace. Good enough for the
+        model to review/summarize a page - not a full HTML renderer.
+        """
+        # Remove script and style blocks entirely (including their content)
+        text = re.sub(
+            r"<(script|style)\b[^>]*>.*?</\1>", " ", raw_html, flags=re.DOTALL | re.IGNORECASE
+        )
+        # Treat block-level break tags as line breaks for readability
+        text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)\s*/?>", "\n", text)
+        # Strip all remaining tags
+        text = re.sub(r"<[^>]+>", " ", text)
+        # Unescape entities (&amp; &nbsp; etc.)
+        text = html.unescape(text)
+        # Collapse runs of spaces/tabs, and trim blank lines
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n\s*\n+", "\n\n", text)
+        return text.strip()
+
+    def _fetch_url(self, url: str) -> str:
+        """Fetch a URL after user permission and return its text content."""
+        url = url.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return "Error: Only http:// and https:// URLs are supported."
+
+        # Permission prompt (mirrors the edit_code approval style)
+        console.print("\n[bold yellow]🌐 Web Request[/bold yellow]")
+        console.print("[dim]Model requested to fetch a URL[/dim]")
+        console.print(Panel(url, title="URL", border_style="yellow"))
+
+        try:
+            response = input("Fetch this URL? (y/N): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Action cancelled by user[/dim]\n")
+            return "URL fetch cancelled by user."
+
+        if response not in ("y", "yes"):
+            console.print("[dim]Action cancelled by user[/dim]\n")
+            return "URL fetch cancelled by user."
+
+        # Build an SSL context with a real CA bundle. Some Python installs
+        # (notably python.org builds on macOS) ship without wired-up system
+        # certificates, which makes HTTPS fail with CERTIFICATE_VERIFY_FAILED.
+        # Prefer certifi's bundle when available, otherwise fall back to the
+        # default context.
+        try:
+            import certifi
+
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            ssl_context = ssl.create_default_context()
+
+        # Fetch with a spinner
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "Slice/1.6 (local Ollama IDE)"}
+            )
+            with Live(
+                Spinner("dots", text=f"[cyan]fetching {url}...[/cyan]"),
+                console=console,
+                transient=True,
+            ) as fetch_live:
+                with urllib.request.urlopen(
+                    request, timeout=self.URL_FETCH_TIMEOUT, context=ssl_context
+                ) as resp:
+                    content_type = resp.headers.get_content_type()
+                    charset = resp.headers.get_content_charset() or "utf-8"
+                    raw = resp.read()
+                fetch_live.stop()
+        except urllib.error.HTTPError as e:
+            console.print(f"[red]✗ HTTP error {e.code} fetching URL[/red]\n")
+            return f"Error fetching URL: HTTP {e.code} {e.reason}"
+        except Exception as e:
+            console.print("[red]✗ Failed to fetch URL[/red]\n")
+            return f"Error fetching URL: {str(e)}"
+
+        text = raw.decode(charset, errors="replace")
+        if "html" in content_type:
+            text = self._html_to_text(text)
+
+        if len(text) > self.MAX_DOCUMENT_CHARS:
+            console.print(
+                f"[yellow]⚠️  Large page ({len(text)} chars) - truncating to first {self.MAX_DOCUMENT_CHARS} chars[/yellow]"
+            )
+            text = (
+                text[: self.MAX_DOCUMENT_CHARS]
+                + f"\n\n[... truncated {len(text) - self.MAX_DOCUMENT_CHARS} additional characters ...]"
+            )
+
+        console.print(f"[green]✓ Fetched {url}[/green]\n")
+        return f"[content from {url} ({content_type})]\n{text}"
+
     def process_stream(self, user_input: str):
         """
         Process user input and stream response from model.
         Supports tool calling for models that can use it.
         Returns True if completed, False if interrupted.
         """
+        # Pick up any edits to SLICE.md before responding (auto-reload).
+        self.refresh_project_instructions()
+
         # Check if this is a skill command
-        if user_input.strip().startswith('/') and self.skill_loader:
+        if user_input.strip().startswith("/") and self.skill_loader:
             # Extract just the skill name (first word after /)
             skill_name = user_input.strip()[1:].split()[0] if user_input.strip()[1:] else ""
             skill = self.skill_loader.get_skill(skill_name)
@@ -682,16 +895,17 @@ class ChatSession:
                 console.print(f"[dim]{skill.description}[/dim]\n")
 
                 # Inject skill instructions as a system message
-                self.conversation_history.append({
-                    "role": "system",
-                    "content": f"The user has invoked the '{skill.name}' skill. Follow these instructions:\n\n{skill.instructions}"
-                })
+                self.conversation_history.append(
+                    {
+                        "role": "system",
+                        "content": f"The user has invoked the '{skill.name}' skill. Follow these instructions:\n\n{skill.instructions}",
+                    }
+                )
 
                 # Also add a user message to trigger the model
-                self.conversation_history.append({
-                    "role": "user",
-                    "content": f"Execute the {skill.name} skill."
-                })
+                self.conversation_history.append(
+                    {"role": "user", "content": f"Execute the {skill.name} skill."}
+                )
             else:
                 # Not a valid skill command, treat as normal user input
                 self.conversation_history.append({"role": "user", "content": user_input})
@@ -1014,6 +1228,27 @@ class ChatSession:
                                     console.print(f"[green]✓ {result}[/green]\n")
 
                                 # Check for interrupt after conversion
+                                if self.interrupted:
+                                    if old_handler:
+                                        signal.signal(signal.SIGINT, old_handler)
+                                    return False
+
+                                # Add tool result to history
+                                self.conversation_history.append(
+                                    {"role": "tool", "content": result}
+                                )
+
+                            elif name == "fetch_url":
+                                url = arguments.get("url", "")
+
+                                if not url:
+                                    console.print("[red]Error: Model provided empty URL[/red]")
+                                    continue
+
+                                # Fetch the URL (asks permission, shows its own UI)
+                                result = self._fetch_url(url)
+
+                                # Check for interrupt after fetch
                                 if self.interrupted:
                                     if old_handler:
                                         signal.signal(signal.SIGINT, old_handler)

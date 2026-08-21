@@ -25,11 +25,18 @@ class ModelSelector:
     # Known models with good tool/function calling support in Ollama
     # Note: mixtral does NOT support tools in Ollama
     TOOL_CAPABLE_MODELS = [
-        "llama3", "llama3.1", "llama3.2", "llama3.3",
+        "llama3",
+        "llama3.1",
+        "llama3.2",
+        "llama3.3",
         "mistral",  # mistral base models support tools, mixtral does not
-        "gemma", "gemma2", "gemma4",
-        "command-r", "command-r-plus",
-        "qwen", "qwen2",
+        "gemma",
+        "gemma2",
+        "gemma4",
+        "command-r",
+        "command-r-plus",
+        "qwen",
+        "qwen2",
     ]
 
     def select_model(self) -> Optional[str]:
@@ -41,7 +48,9 @@ class ModelSelector:
 
             if not models:
                 console.print("[red]No local Ollama models found.[/red]")
-                console.print("[yellow]Run 'ollama pull <model>' to download a model first.[/yellow]")
+                console.print(
+                    "[yellow]Run 'ollama pull <model>' to download a model first.[/yellow]"
+                )
                 return None
 
             # Check if we're in an interactive terminal
@@ -50,27 +59,31 @@ class ModelSelector:
                 return self._select_model_by_number(models)
 
             console.print("[bold]Available Models:[/bold]")
-            console.print("[dim]Use ↑/↓ arrows to navigate, Enter to select, Ctrl+C to exit[/dim]\n")
+            console.print(
+                "[dim]Use ↑/↓ arrows to navigate, Enter to select, Ctrl+C to exit[/dim]\n"
+            )
 
             selected_idx = 0
 
             # Use Live display for interactive selection
-            with Live(self._render_model_list(models, selected_idx), console=console, auto_refresh=False) as live:
+            with Live(
+                self._render_model_list(models, selected_idx), console=console, auto_refresh=False
+            ) as live:
                 while True:
                     key = self._get_key()
 
-                    if key == '\x03':  # Ctrl+C
+                    if key == "\x03":  # Ctrl+C
                         console.print("\n[yellow]Selection cancelled[/yellow]")
                         return None
-                    elif key == '\x1b[A':  # Up arrow
+                    elif key == "\x1b[A":  # Up arrow
                         selected_idx = (selected_idx - 1) % len(models)
                         live.update(self._render_model_list(models, selected_idx))
                         live.refresh()
-                    elif key == '\x1b[B':  # Down arrow
+                    elif key == "\x1b[B":  # Down arrow
                         selected_idx = (selected_idx + 1) % len(models)
                         live.update(self._render_model_list(models, selected_idx))
                         live.refresh()
-                    elif key in ('\r', '\n'):  # Enter
+                    elif key in ("\r", "\n"):  # Enter
                         selected = models[selected_idx]
                         break
 
@@ -125,7 +138,7 @@ class ModelSelector:
             tty.setraw(fd)
             ch = sys.stdin.read(1)
             # Check for escape sequences (arrow keys)
-            if ch == '\x1b':
+            if ch == "\x1b":
                 ch += sys.stdin.read(2)
             return ch
         finally:
@@ -159,7 +172,9 @@ class ChatUI:
 
         # Show available skills if any
         if self.session.skill_loader and self.session.skill_loader.has_skills():
-            skill_names = ', '.join(f'/{name}' for name in self.session.skill_loader.list_skill_names())
+            skill_names = ", ".join(
+                f"/{name}" for name in self.session.skill_loader.list_skill_names()
+            )
             self.console.print(f"[dim]Available skills: {skill_names}[/dim]")
 
         self.console.print("[dim]Use ↑/↓ arrows for command history\n[/dim]")
@@ -167,7 +182,9 @@ class ChatUI:
         while True:
             try:
                 # Show pizza emoji as cursor with command history
-                user_input = prompt("🍕 ", history=self.history, key_bindings=self._get_key_bindings())
+                user_input = prompt(
+                    "🍕 ", history=self.history, key_bindings=self._get_key_bindings()
+                )
 
                 if not user_input.strip():
                     continue
@@ -176,7 +193,7 @@ class ChatUI:
                 self.exit_count = 0
 
                 # Check for /model command
-                if user_input.strip() == '/model':
+                if user_input.strip() == "/model":
                     self._switch_model()
                     continue
 
@@ -237,9 +254,21 @@ class ChatUI:
         old_history = self.session.conversation_history.copy()
 
         # Create new session with selected model, preserving skill_loader
-        self.session = ChatSession(selected_model, safe_directory=self.safe_directory, skill_loader=self.session.skill_loader)
+        self.session = ChatSession(
+            selected_model,
+            safe_directory=self.safe_directory,
+            skill_loader=self.session.skill_loader,
+        )
 
         # Restore conversation history to new session
         self.session.conversation_history = old_history
 
+        # Re-sync SLICE.md into the restored history (force, since the copied
+        # history may carry a stale copy of the project instructions).
+        self.session.refresh_project_instructions(force=True)
+
         self.console.print(f"[green]✓ Switched to {selected_model}[/green]\n")
+        if self.session.has_project_instructions:
+            self.console.print(
+                f"[dim]✓ Project instructions ({ChatSession.PROJECT_INSTRUCTIONS_FILE}) active[/dim]\n"
+            )

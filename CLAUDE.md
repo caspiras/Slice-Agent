@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **main.py** - CLI entry point, signal handling (double Ctrl+C to exit), startup banner; constructs `SkillLoader` and initial `ChatSession`
 2. **ui.py** - ModelSelector (arrow-key selection) and ChatUI (prompt interface); handles `/model` switching and skill discovery display
-3. **chat.py** - ChatSession class, Ollama API integration, the 6 tool definitions and their execution; also dispatches `/skill` commands
+3. **chat.py** - ChatSession class, Ollama API integration, the 7 tool definitions and their execution; also dispatches `/skill` commands and auto-loads `SLICE.md` project instructions
 4. **executor.py** - CommandExecutor class for sandboxed bash execution with permission prompts
 5. **document_reader.py** - Read PDF, Word, Excel, PowerPoint, CSV, text files
 6. **document_writer.py** - Write Word, Excel, PowerPoint, PDF, CSV, text files with operations
@@ -40,7 +40,7 @@ slice/
 │   └── skills.py            # Skill loader & parser (~130 lines)
 ├── slice-skills/            # Optional user-defined slash commands (one folder per skill)
 │   └── <skill-name>/skill.md
-├── pyproject.toml           # Python package config (v1.5.1)
+├── pyproject.toml           # Python package config (v1.6.0)
 └── README.md                # User documentation
 ```
 
@@ -75,7 +75,7 @@ ruff check src/
 
 ### 2. Tool-Based Model Interaction
 
-Slice uses Ollama's function/tool calling feature. Models that support tools receive 6 tool definitions:
+Slice uses Ollama's function/tool calling feature. Models that support tools receive 7 tool definitions:
 
 **Available Tools:**
 1. **bash** - Execute shell commands (file operations, git, search, etc.)
@@ -84,6 +84,7 @@ Slice uses Ollama's function/tool calling feature. Models that support tools rec
 4. **edit_code** - Edit source code files with diff preview and approval
 5. **convert_to_json** - Convert Excel/CSV/Word/PDF to JSON (CSV read in `CSV_CHUNK_SIZE`=10k chunks; PDF page-by-page)
 6. **convert_to_markdown** - Convert Excel/CSV/Word/PDF to Markdown (tables rendered with `|` syntax via `tabulate`)
+7. **fetch_url** - Fetch/read a web page (http/https) via stdlib `urllib`; permission-gated; HTML stripped to text
 
 **Tool-capable models:** the authoritative list is `TOOL_CAPABLE_MODELS` in `chat.py` (llama3/llama3.1/llama3.2/llama3.3, mistral, gemma/gemma2/gemma4, command-r/command-r-plus, qwen/qwen2). Note: llama3.1 8B has weak tool calling in practice — prefer gemma4. (The README also recommends `granite4`, but it is not currently in `TOOL_CAPABLE_MODELS` — add it there if you want it auto-detected.)
 
@@ -188,6 +189,39 @@ All operations are restricted to the directory where `slice` was started.
 4. Markdown path renders tables with tabulate ("|"-delimited)
 5. Writes output_file and returns a success/row/page summary to the model
 ```
+
+### Fetch URL Tool
+```python
+# In chat.py, ChatSession._fetch_url()
+1. Model calls fetch_url with a url (must be http:// or https://)
+2. Permission prompt shows the URL in a panel; user must approve (y/N) BEFORE any network call
+3. On approval: urllib.request.urlopen with URL_FETCH_TIMEOUT (30s) and a Slice User-Agent
+4. HTML responses run through _html_to_text() (strips <script>/<style>, tags, unescapes entities)
+5. Truncated to MAX_DOCUMENT_CHARS, returned to the model
+# Note: URLs are network access (outside the filesystem sandbox by design) — the gate is the
+# permission prompt, not the sandbox-escape check. Uses stdlib only (no requests dependency).
+```
+
+## Project Instructions (SLICE.md)
+
+Slice auto-loads a per-project instructions file so users can give the model persistent,
+project-specific guidance (its analogue to this CLAUDE.md, but for the Ollama model at runtime).
+
+- `ChatSession.__init__` calls `refresh_project_instructions()`, which reads `SLICE.md` from the
+  sandbox directory (`PROJECT_INSTRUCTIONS_FILE` constant) via `_read_project_instructions()`.
+  Missing/unreadable → silently ignored (never blocks startup).
+- If present, its contents are injected as a **second `system` message** right after the base
+  system prompt (header from `_project_instructions_header()`), and `self.has_project_instructions`
+  is set. `main.py` prints a load confirmation, or a hint to create one when absent.
+- **Auto-reload:** `refresh_project_instructions()` is called at the start of every `process_stream`
+  turn. It compares the file's current text to the last-synced copy (`self._project_instructions_text`)
+  and, on change, updates the existing instruction message **in place** (found by header prefix so it
+  never duplicates). Handles create / edit / delete of `SLICE.md` mid-session — edits take effect on
+  the next prompt, no restart needed.
+- **Persistence across `/model`:** `ui._switch_model()` copies the old `conversation_history` into
+  the new session, then calls `refresh_project_instructions(force=True)`. The `force` bypasses the
+  unchanged-text short-circuit so a stale copy carried over in the history is replaced with the
+  current file contents.
 
 ## Document Operations
 
@@ -386,6 +420,7 @@ openpyxl>=3.0.0           # Excel spreadsheets
 python-pptx>=0.6.0        # PowerPoint presentations
 pandas>=2.0.0             # File format conversion (Excel/CSV to JSON)
 tabulate>=0.9.0           # Markdown table rendering (convert_to_markdown)
+certifi>=2023.0.0         # CA bundle for HTTPS fetch_url (SSL verification)
 
 # Dev dependencies
 pytest>=7.0.0
@@ -396,7 +431,13 @@ ruff>=0.1.0               # Linter (line-length 100)
 
 ## Version History
 
-- **v1.5.1** - Current version, folder-based skills structure
+- **v1.6.0** - Current version, project instructions & web access
+  - `SLICE.md` auto-loaded per-project instructions (injected as a system message on session start; persists across `/model`)
+  - New `fetch_url` tool: permission-gated web page fetching via stdlib `urllib` (HTTPS uses `certifi` CA bundle; HTML stripped to text)
+  - Added `certifi` dependency (fixes macOS python.org `CERTIFICATE_VERIFY_FAILED` on HTTPS)
+  - Startup hint to create a `SLICE.md` when none is present
+
+- **v1.5.1** - Folder-based skills structure
   - Skills moved from flat `slice-skills/<name>.md` to folder-per-skill `slice-skills/<name>/skill.md`
   - Folder name is the canonical invocation name (frontmatter `name:` ignored)
   - Bug fix: skills now persist across `/model` switches (skill_loader passed to new ChatSession)
