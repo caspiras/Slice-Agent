@@ -16,25 +16,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Core Components
 
-1. **main.py** - CLI entry point, signal handling (double Ctrl+C to exit), startup banner
-2. **ui.py** - ModelSelector (arrow-key selection) and ChatUI (prompt interface)
-3. **chat.py** - ChatSession class, Ollama API integration, tool definitions and execution
+1. **main.py** - CLI entry point, signal handling (double Ctrl+C to exit), startup banner; constructs `SkillLoader` and initial `ChatSession`
+2. **ui.py** - ModelSelector (arrow-key selection) and ChatUI (prompt interface); handles `/model` switching and skill discovery display
+3. **chat.py** - ChatSession class, Ollama API integration, the 6 tool definitions and their execution; also dispatches `/skill` commands
 4. **executor.py** - CommandExecutor class for sandboxed bash execution with permission prompts
 5. **document_reader.py** - Read PDF, Word, Excel, PowerPoint, CSV, text files
-6. **document_writer.py** - Write Word, Excel, PowerPoint, CSV, text files with operations
+6. **document_writer.py** - Write Word, Excel, PowerPoint, PDF, CSV, text files with operations
+7. **convert_helpers.py** - Standalone Python conversion scripts (as strings). NOTE: currently **not imported anywhere** — the live conversion logic is duplicated in-process inside `chat.py` (`_convert_*` methods). Treat this file as dead/reference code unless you wire it up.
+8. **skills.py** - SkillLoader/Skill: discover and parse folder-based custom slash commands from `slice-skills/`
 
 ### Project Structure
 
 ```
-slice_agent/
+slice/
 ├── src/slice/
-│   ├── main.py              # Entry point & signal handling
-│   ├── ui.py                # ModelSelector & ChatUI (Rich + prompt-toolkit)
-│   ├── chat.py              # ChatSession with Ollama integration (~629 lines)
-│   ├── executor.py          # CommandExecutor for sandboxed bash (~234 lines)
-│   ├── document_reader.py   # Multi-format document reading (~222 lines)
-│   └── document_writer.py   # Multi-format document writing (~442 lines)
-├── pyproject.toml           # Python package config (v1.1.0)
+│   ├── main.py              # Entry point & signal handling (~81 lines)
+│   ├── ui.py                # ModelSelector & ChatUI (Rich + prompt-toolkit) (~245 lines)
+│   ├── chat.py              # ChatSession with Ollama integration + tools (~1118 lines)
+│   ├── executor.py          # CommandExecutor for sandboxed bash (~211 lines)
+│   ├── document_reader.py   # Multi-format document reading (~253 lines)
+│   ├── document_writer.py   # Multi-format document writing (~567 lines)
+│   ├── convert_helpers.py   # File→JSON conversion scripts (~139 lines)
+│   └── skills.py            # Skill loader & parser (~130 lines)
+├── slice-skills/            # Optional user-defined slash commands (one folder per skill)
+│   └── <skill-name>/skill.md
+├── pyproject.toml           # Python package config (v1.5.1)
 └── README.md                # User documentation
 ```
 
@@ -69,15 +75,17 @@ ruff check src/
 
 ### 2. Tool-Based Model Interaction
 
-Slice uses Ollama's function/tool calling feature. Models that support tools receive 4 tool definitions:
+Slice uses Ollama's function/tool calling feature. Models that support tools receive 6 tool definitions:
 
 **Available Tools:**
 1. **bash** - Execute shell commands (file operations, git, search, etc.)
 2. **read_document** - Read PDF, Word (.docx), Excel (.xlsx), CSV, text files
 3. **write_document** - Write Word, Excel, PowerPoint, PDF, CSV, text with JSON operations
 4. **edit_code** - Edit source code files with diff preview and approval
+5. **convert_to_json** - Convert Excel/CSV/Word/PDF to JSON (CSV read in `CSV_CHUNK_SIZE`=10k chunks; PDF page-by-page)
+6. **convert_to_markdown** - Convert Excel/CSV/Word/PDF to Markdown (tables rendered with `|` syntax via `tabulate`)
 
-**Tool-capable models:** llama3.x, mistral, gemma, gemma2, gemma4, command-r, qwen, qwen2
+**Tool-capable models:** the authoritative list is `TOOL_CAPABLE_MODELS` in `chat.py` (llama3/llama3.1/llama3.2/llama3.3, mistral, gemma/gemma2/gemma4, command-r/command-r-plus, qwen/qwen2). Note: llama3.1 8B has weak tool calling in practice — prefer gemma4. (The README also recommends `granite4`, but it is not currently in `TOOL_CAPABLE_MODELS` — add it there if you want it auto-detected.)
 
 **How it works:**
 - Model decides when to call tools based on user request
@@ -170,6 +178,17 @@ All operations are restricted to the directory where `slice` was started.
 8. Return result to model
 ```
 
+### Convert Tools (to JSON / to Markdown)
+```python
+# In chat.py, ChatSession._convert_to_json() / ._convert_to_markdown()
+1. Model calls convert_to_json or convert_to_markdown with input_file, output_file
+2. Paths resolved relative to safe_directory; source format detected by extension (.xlsx/.csv/.docx/.pdf)
+3. Dispatched to a per-format helper that runs IN-PROCESS (imports pandas / python-docx / pypdf directly,
+   NOT via the executor). CSV is read in CSV_CHUNK_SIZE (10k) chunks; PDF is processed page-by-page.
+4. Markdown path renders tables with tabulate ("|"-delimited)
+5. Writes output_file and returns a success/row/page summary to the model
+```
+
 ## Document Operations
 
 ### Supported Read Formats
@@ -232,6 +251,26 @@ All operations are restricted to the directory where `slice` was started.
 - On model switch: `new_session = ChatSession(new_model, safe_directory)`
 - Copy history: `new_session.conversation_history = old_session.conversation_history`
 - Lazy import of ChatSession in `ui.py._switch_model()` avoids circular dependencies
+- **The `skill_loader` must be passed through on switch** (`ChatSession(..., skill_loader=self.session.skill_loader)`) — otherwise skills silently stop working after `/model` (this was the v1.5.1 bug fix)
+
+## Skills System (custom `/slash` commands)
+
+Skills let users define reusable instruction sets invoked as `/skill-name`.
+
+**Discovery & format (`skills.py`):**
+- `SkillLoader(working_directory)` scans `<safe_dir>/slice-skills/` at startup (in `main.py`)
+- **Folder-per-skill layout:** each skill is a subdirectory containing a `skill.md`; the *folder name* is the canonical invocation name. A `name:` field in frontmatter is **ignored** (only the folder name counts).
+- `skill.md` requires YAML-ish frontmatter (`---` delimited) with a required `description:` and non-empty instructions below the closing `---`. Any other frontmatter key lands in `metadata`.
+- A malformed skill logs a warning and is skipped — it never aborts startup.
+
+**Invocation flow (`chat.py` `process_stream`):**
+1. Input starting with `/` (and `skill_loader` present) is parsed for the first word as the skill name
+2. If it matches a loaded skill, the skill's instructions are injected as a **system message**, followed by a synthetic user message telling the model to execute the skill
+3. If it doesn't match a loaded skill, the input is treated as normal chat (so `/model` is handled separately, in `ui.py`, before reaching here)
+
+**Where skills surface in the UI:** `ChatUI.run()` prints the available `/skill` names on startup when `skill_loader.has_skills()`.
+
+> Note: the top-level `slice-skills/README.md` still documents the older flat `my-skill.md` layout; the code (and repo's example skills) use the folder-per-skill layout. Prefer the code's behavior.
 
 ## System Message Guidelines
 
@@ -346,6 +385,7 @@ python-docx>=1.0.0        # Word documents
 openpyxl>=3.0.0           # Excel spreadsheets
 python-pptx>=0.6.0        # PowerPoint presentations
 pandas>=2.0.0             # File format conversion (Excel/CSV to JSON)
+tabulate>=0.9.0           # Markdown table rendering (convert_to_markdown)
 
 # Dev dependencies
 pytest>=7.0.0
@@ -356,7 +396,28 @@ ruff>=0.1.0               # Linter (line-length 100)
 
 ## Version History
 
-- **v1.3.0** - Current version, universal file-to-JSON conversion and UI fixes
+- **v1.5.1** - Current version, folder-based skills structure
+  - Skills moved from flat `slice-skills/<name>.md` to folder-per-skill `slice-skills/<name>/skill.md`
+  - Folder name is the canonical invocation name (frontmatter `name:` ignored)
+  - Bug fix: skills now persist across `/model` switches (skill_loader passed to new ChatSession)
+
+- **v1.5.0** - Skills system
+  - Custom `/slash` commands defined in `slice-skills/` (SkillLoader in `skills.py`)
+  - Example skills: `/hello`, `/test`, `/git-status`
+
+- **v1.4.0** - Enhanced model behavior for tool calling
+  - System-message fixes so models create Python apps with bash (not write_document)
+  - Better sequential tool execution (create file → run file); guidance for executable files
+  - Better behavior for gemma4 and others; llama3.1 8B noted as weak for tools
+
+- **v1.3.2** - Markdown conversion
+  - Added `convert_to_markdown` tool (Excel/CSV/Word/PDF → Markdown, tables via `tabulate`)
+
+- **v1.3.1** - Large-file conversion & Word tables
+  - Word table extraction alongside paragraphs
+  - Dedicated `convert_to_json` tool (replaces error-prone bash one-liners; chunked for large files)
+
+- **v1.3.0** - Universal file-to-JSON conversion and UI fixes
   - Added universal file-to-JSON conversion support (Excel, CSV, Word, PDF)
   - Excel/CSV use pandas for tabular data conversion
   - Word documents use python-docx to extract paragraphs
