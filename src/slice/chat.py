@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.spinner import Spinner
 from rich.panel import Panel
+from rich.markdown import Markdown
 
 console = Console()
 
@@ -194,6 +195,7 @@ class ChatSession:
     MAX_DOCUMENT_CHARS = 100000  # ~100KB max for document content
     CSV_CHUNK_SIZE = 10000  # Process CSV files in 10k row chunks
     URL_FETCH_TIMEOUT = 30  # Timeout in seconds for fetching a URL
+    MAX_TOOL_ROUNDS = 10  # Max sequential tool-call rounds per user turn (loop guard)
     PROJECT_INSTRUCTIONS_FILE = "SLICE.md"  # Auto-loaded per-project instructions
 
     def __init__(self, model_name: str, safe_directory: str, skill_loader=None):
@@ -249,6 +251,10 @@ class ChatSession:
                     "User: 'create an app' → You create file, then respond 'Created app.py. Would you like me to run it?' ← WRONG! Make the second bash call.\n"
                     "User: 'Yes' → You respond: 'Running app.py' ← WRONG! You must CALL the bash tool!\n\n"
                     "After executing a tool successfully, respond concisely - DO NOT explain the code or give instructions\n"
+                    "The user already sees each tool's raw output in the terminal. Do NOT paste that raw output back\n"
+                    "verbatim. Instead add value: present it usefully, summarize, or answer their question. If a project's\n"
+                    "SLICE.md specifies an exact display/formatting for a command's data, follow that. If the output already\n"
+                    "answers the request and there is nothing to add, reply with a brief one-line confirmation.\n"
                     "Default to ACTION (calling tools) when request is ambiguous - user can always deny the permission prompt\n\n"
                     "IMPORTANT - When to use tools:\n"
                     "- Use bash tool for file/system operations (create files, list directories, git commands, etc.)\n"
@@ -875,6 +881,174 @@ class ChatSession:
         console.print(f"[green]✓ Fetched {url}[/green]\n")
         return f"[content from {url} ({content_type})]\n{text}"
 
+    def _stream_assistant_text(self, stream, spinner_live=None):
+        """Consume an Ollama chat stream and render the assistant text as Markdown.
+
+        Feeding the accumulated text through rich.markdown.Markdown means headers,
+        bold, lists and tables render formatted instead of showing as raw
+        '**' / '#' / '|' syntax. A Live region re-renders on each token so the
+        response still appears progressively, and the formatted output persists
+        once streaming completes.
+
+        `spinner_live`, if given, is the active "baking..." spinner; it is stopped
+        as soon as the first content or tool call arrives. Returns
+        (response_text, tool_calls). Respects self.interrupted for early exit and
+        strips <tool_call> tags that some models emit.
+        """
+        response_text = ""
+        tool_calls = None
+
+        def stop_spinner():
+            if spinner_live is not None and spinner_live.is_started:
+                spinner_live.stop()
+
+        # Non-transient Live so the rendered Markdown stays on screen afterward.
+        md_live = Live(console=console, refresh_per_second=15, transient=False)
+        md_started = False
+        try:
+            for chunk in stream:
+                if self.interrupted:
+                    break
+
+                message = chunk.get("message", {})
+
+                # Tool calls can arrive in any chunk, before done=True
+                chunk_tool_calls = message.get("tool_calls")
+                if chunk_tool_calls:
+                    tool_calls = chunk_tool_calls
+                    stop_spinner()
+
+                if chunk.get("done"):
+                    break
+
+                content = message.get("content", "")
+                if content and "<tool_call>" not in content and "</tool_call>" not in content:
+                    stop_spinner()
+                    response_text += content
+                    if not md_started:
+                        md_live.start()
+                        md_started = True
+                    md_live.update(Markdown(response_text))
+        finally:
+            if md_started:
+                md_live.stop()
+            stop_spinner()
+
+        if self.interrupted:
+            console.print("\n[yellow]⚠️  Generation interrupted[/yellow]")
+
+        return response_text, tool_calls
+
+    def _dispatch_tool_call(self, name: str, arguments: dict) -> str:
+        """Execute a single tool call and return its result string for the model.
+
+        Each tool renders its own UI (permission prompts, spinners) as needed.
+        Empty/invalid parameters return an error string (instead of silently
+        skipping) so the model gets feedback and can correct itself next round.
+        """
+        if name == "bash":
+            command = arguments.get("command", "")
+            if not command:
+                console.print("[red]Error: Model provided empty command[/red]")
+                return "Error: empty command provided"
+            # Execute the command (has its own permission UI)
+            return self._execute_command(command)
+
+        if name == "read_document":
+            file_path = arguments.get("file_path", "")
+            if not file_path:
+                console.print("[red]Error: Model provided empty file path[/red]")
+                return "Error: empty file path provided"
+            # Show spinner while reading (can take time for large files)
+            with Live(
+                Spinner("dots", text=f"[cyan]reading {file_path}...[/cyan]"),
+                console=console,
+                transient=True,
+            ) as read_live:
+                result = self._read_document(file_path)
+                read_live.stop()
+            console.print("[green]✓ Document loaded[/green]\n")
+            return result
+
+        if name == "write_document":
+            file_path = arguments.get("file_path", "")
+            operations = arguments.get("operations", "")
+            if not file_path or not operations:
+                console.print("[red]Error: Model provided incomplete parameters[/red]")
+                return "Error: incomplete parameters (need file_path and operations)"
+            with Live(
+                Spinner("dots", text=f"[cyan]writing {file_path}...[/cyan]"),
+                console=console,
+                transient=True,
+            ) as write_live:
+                result = self._write_document(file_path, operations)
+                write_live.stop()
+            if result.startswith("Error:"):
+                console.print(f"[red]✗ {result}[/red]\n")
+            else:
+                console.print("[green]✓ Document updated[/green]\n")
+            return result
+
+        if name == "edit_code":
+            file_path = arguments.get("file_path", "")
+            old_content = arguments.get("old_content", "")
+            new_content = arguments.get("new_content", "")
+            description = arguments.get("description", "")
+            if not file_path or not old_content or not new_content:
+                console.print("[red]Error: Model provided incomplete parameters[/red]")
+                return "Error: incomplete parameters (need file_path, old_content, new_content)"
+            # Edit the code file (shows diff and asks for permission)
+            return self._edit_code(file_path, old_content, new_content, description)
+
+        if name == "convert_to_json":
+            input_file = arguments.get("input_file", "")
+            output_file = arguments.get("output_file", "")
+            if not input_file or not output_file:
+                console.print("[red]Error: Model provided incomplete parameters[/red]")
+                return "Error: incomplete parameters (need input_file and output_file)"
+            with Live(
+                Spinner("dots", text=f"[cyan]converting {input_file} to JSON...[/cyan]"),
+                console=console,
+                transient=True,
+            ) as convert_live:
+                result = self._convert_to_json(input_file, output_file)
+                convert_live.stop()
+            if result.startswith("Error:"):
+                console.print(f"[red]✗ {result}[/red]\n")
+            else:
+                console.print(f"[green]✓ {result}[/green]\n")
+            return result
+
+        if name == "convert_to_markdown":
+            input_file = arguments.get("input_file", "")
+            output_file = arguments.get("output_file", "")
+            if not input_file or not output_file:
+                console.print("[red]Error: Model provided incomplete parameters[/red]")
+                return "Error: incomplete parameters (need input_file and output_file)"
+            with Live(
+                Spinner("dots", text=f"[cyan]converting {input_file} to Markdown...[/cyan]"),
+                console=console,
+                transient=True,
+            ) as convert_live:
+                result = self._convert_to_markdown(input_file, output_file)
+                convert_live.stop()
+            if result.startswith("Error:"):
+                console.print(f"[red]✗ {result}[/red]\n")
+            else:
+                console.print(f"[green]✓ {result}[/green]\n")
+            return result
+
+        if name == "fetch_url":
+            url = arguments.get("url", "")
+            if not url:
+                console.print("[red]Error: Model provided empty URL[/red]")
+                return "Error: empty URL provided"
+            # Fetch the URL (asks permission, shows its own UI)
+            return self._fetch_url(url)
+
+        console.print(f"[yellow]⚠️  Model requested unknown tool: {name}[/yellow]")
+        return f"Error: unknown tool '{name}'"
+
     def process_stream(self, user_input: str):
         """
         Process user input and stream response from model.
@@ -936,41 +1110,8 @@ class ChatSession:
                 # Install interrupt handler for streaming
                 old_handler = signal.signal(signal.SIGINT, interrupt_handler)
 
-                # Collect response and check for tool calls
-                tool_calls = None
-                first_chunk = True
-                for chunk in stream:
-                    # Check for interrupt
-                    if self.interrupted:
-                        live.stop()
-                        console.print("\n[yellow]⚠️  Generation interrupted[/yellow]")
-                        break
-
-                    # Check for tool calls in ANY chunk (they arrive before done=True)
-                    message = chunk.get("message", {})
-                    chunk_tool_calls = message.get("tool_calls")
-                    if chunk_tool_calls:
-                        tool_calls = chunk_tool_calls
-                        # Stop spinner when we detect tool call
-                        if first_chunk:
-                            live.stop()
-                            first_chunk = False
-
-                    if chunk.get("done"):
-                        break
-
-                    content = message.get("content", "")
-                    if content:
-                        # Stop spinner on first content
-                        if first_chunk:
-                            live.stop()
-                            first_chunk = False
-                        # Filter out <tool_call> tags that some models emit
-                        if "<tool_call>" not in content and "</tool_call>" not in content:
-                            # Print with syntax highlighting but no markup interpretation
-                            console.print(content, end="", markup=False)
-                            response_text += content
-                        # If content has tool_call tags, still need to stop spinner but don't print/save
+                # Collect + render the response (as Markdown) and check for tool calls
+                response_text, tool_calls = self._stream_assistant_text(stream, spinner_live=live)
 
                 # Make sure spinner is stopped
                 if live.is_started:
@@ -1005,16 +1146,7 @@ class ChatSession:
                         model=self.model_name, messages=self.conversation_history, stream=True
                     )
 
-                    response_text = ""
-                    for chunk in retry_stream:
-                        if chunk.get("done"):
-                            break
-                        content = chunk.get("message", {}).get("content", "")
-                        if content:
-                            # Filter out <tool_call> tags that some models emit
-                            if "<tool_call>" not in content and "</tool_call>" not in content:
-                                console.print(content, end="", markup=False)
-                                response_text += content
+                    response_text, _ = self._stream_assistant_text(retry_stream)
 
                     console.print()  # Newline
 
@@ -1033,8 +1165,13 @@ class ChatSession:
                     assistant_message["tool_calls"] = tool_calls
                 self.conversation_history.append(assistant_message)
 
-                # Handle tool calls if any
-                if tool_calls:
+                # Handle tool calls, looping so the model can run multiple rounds
+                # of tools (e.g. run a command, see its output, then fetch a page
+                # and build a table) instead of being cut off after a single round.
+                # MAX_TOOL_ROUNDS guards against infinite loops.
+                rounds = 0
+                while tool_calls and rounds < self.MAX_TOOL_ROUNDS:
+                    rounds += 1
                     console.print()  # Newline before tool execution
                     for tool_call in tool_calls:
                         # Check for interrupt before each tool call
@@ -1050,222 +1187,28 @@ class ChatSession:
                             name = function.get("name")
                             arguments = function.get("arguments", {})
 
-                            if name == "bash":
-                                command = arguments.get("command", "")
+                            result = self._dispatch_tool_call(name, arguments)
 
-                                if not command:
-                                    console.print("[red]Error: Model provided empty command[/red]")
-                                    continue
+                            # Add tool result to history
+                            self.conversation_history.append({"role": "tool", "content": result})
 
-                                # Execute the command (has its own UI)
-                                result = self._execute_command(command)
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "read_document":
-                                file_path = arguments.get("file_path", "")
-
-                                if not file_path:
-                                    console.print(
-                                        "[red]Error: Model provided empty file path[/red]"
-                                    )
-                                    continue
-
-                                # Show spinner while reading document (this can take time for large files)
-                                with Live(
-                                    Spinner("dots", text=f"[cyan]reading {file_path}...[/cyan]"),
-                                    console=console,
-                                    transient=True,  # Clean up after completion
-                                ) as read_live:
-                                    result = self._read_document(file_path)
-                                    read_live.stop()
-
-                                console.print("[green]✓ Document loaded[/green]\n")
-
-                                # Check for interrupt after document load
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "write_document":
-                                file_path = arguments.get("file_path", "")
-                                operations = arguments.get("operations", "")
-
-                                if not file_path or not operations:
-                                    console.print(
-                                        "[red]Error: Model provided incomplete parameters[/red]"
-                                    )
-                                    continue
-
-                                # Show spinner while writing document
-                                with Live(
-                                    Spinner("dots", text=f"[cyan]writing {file_path}...[/cyan]"),
-                                    console=console,
-                                    transient=True,  # Clean up after completion
-                                ) as write_live:
-                                    result = self._write_document(file_path, operations)
-                                    write_live.stop()
-
-                                # Show success or error based on result
-                                if result.startswith("Error:"):
-                                    console.print(f"[red]✗ {result}[/red]\n")
-                                else:
-                                    console.print("[green]✓ Document updated[/green]\n")
-
-                                # Check for interrupt after write
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "edit_code":
-                                file_path = arguments.get("file_path", "")
-                                old_content = arguments.get("old_content", "")
-                                new_content = arguments.get("new_content", "")
-                                description = arguments.get("description", "")
-
-                                if not file_path or not old_content or not new_content:
-                                    console.print(
-                                        "[red]Error: Model provided incomplete parameters[/red]"
-                                    )
-                                    continue
-
-                                # Edit the code file (shows diff and asks for permission)
-                                result = self._edit_code(
-                                    file_path, old_content, new_content, description
-                                )
-
-                                # Check for interrupt after edit
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "convert_to_json":
-                                input_file = arguments.get("input_file", "")
-                                output_file = arguments.get("output_file", "")
-
-                                if not input_file or not output_file:
-                                    console.print(
-                                        "[red]Error: Model provided incomplete parameters[/red]"
-                                    )
-                                    continue
-
-                                # Show spinner while converting (can take time for large files)
-                                with Live(
-                                    Spinner(
-                                        "dots",
-                                        text=f"[cyan]converting {input_file} to JSON...[/cyan]",
-                                    ),
-                                    console=console,
-                                    transient=True,
-                                ) as convert_live:
-                                    result = self._convert_to_json(input_file, output_file)
-                                    convert_live.stop()
-
-                                # Show success or error based on result
-                                if result.startswith("Error:"):
-                                    console.print(f"[red]✗ {result}[/red]\n")
-                                else:
-                                    console.print(f"[green]✓ {result}[/green]\n")
-
-                                # Check for interrupt after conversion
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "convert_to_markdown":
-                                input_file = arguments.get("input_file", "")
-                                output_file = arguments.get("output_file", "")
-
-                                if not input_file or not output_file:
-                                    console.print(
-                                        "[red]Error: Model provided incomplete parameters[/red]"
-                                    )
-                                    continue
-
-                                # Show spinner while converting (can take time for large files)
-                                with Live(
-                                    Spinner(
-                                        "dots",
-                                        text=f"[cyan]converting {input_file} to Markdown...[/cyan]",
-                                    ),
-                                    console=console,
-                                    transient=True,
-                                ) as convert_live:
-                                    result = self._convert_to_markdown(input_file, output_file)
-                                    convert_live.stop()
-
-                                # Show success or error based on result
-                                if result.startswith("Error:"):
-                                    console.print(f"[red]✗ {result}[/red]\n")
-                                else:
-                                    console.print(f"[green]✓ {result}[/green]\n")
-
-                                # Check for interrupt after conversion
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
-
-                            elif name == "fetch_url":
-                                url = arguments.get("url", "")
-
-                                if not url:
-                                    console.print("[red]Error: Model provided empty URL[/red]")
-                                    continue
-
-                                # Fetch the URL (asks permission, shows its own UI)
-                                result = self._fetch_url(url)
-
-                                # Check for interrupt after fetch
-                                if self.interrupted:
-                                    if old_handler:
-                                        signal.signal(signal.SIGINT, old_handler)
-                                    return False
-
-                                # Add tool result to history
-                                self.conversation_history.append(
-                                    {"role": "tool", "content": result}
-                                )
+                            # Check for interrupt after the tool ran
+                            if self.interrupted:
+                                if old_handler:
+                                    signal.signal(signal.SIGINT, old_handler)
+                                return False
 
                         except Exception as e:
                             console.print(f"[red]Error executing tool: {e}[/red]")
                             import traceback
 
                             traceback.print_exc()
+                            # Feed the error back so the model can react/correct
+                            self.conversation_history.append(
+                                {"role": "tool", "content": f"Error executing tool: {e}"}
+                            )
 
-                    # Check for interrupt after all tools
+                    # Check for interrupt after this round's tools
                     if self.interrupted:
                         console.print("\n[yellow]⚠️  Interrupted before final response[/yellow]")
                         # Restore handler and return
@@ -1273,8 +1216,11 @@ class ChatSession:
                             signal.signal(signal.SIGINT, old_handler)
                         return False
 
-                    # Get final response from model with tool results
-                    # Show spinner while waiting for response
+                    # Get the model's next response given the tool results. It may
+                    # contain MORE tool calls (→ another round) or a final text
+                    # answer (→ tool_calls is None and the loop ends).
+                    next_text = ""
+                    tool_calls = None
                     with Live(
                         Spinner("dots", text="[cyan]baking...[/cyan]"),
                         console=console,
@@ -1287,43 +1233,38 @@ class ChatSession:
                             stream=True,
                         )
 
-                        # Wait for first chunk before stopping spinner
-                        final_text = ""
-                        first_chunk = True
-                        for chunk in final_stream:
-                            # Check for interrupt
-                            if self.interrupted:
-                                final_live.stop()
-                                console.print("\n[yellow]⚠️  Generation interrupted[/yellow]")
-                                break
-
-                            if chunk.get("done"):
-                                break
-
-                            content = chunk.get("message", {}).get("content", "")
-                            if content:
-                                # Stop spinner on first content
-                                if first_chunk:
-                                    final_live.stop()
-                                    first_chunk = False
-
-                                # Filter out <tool_call> tags that some models emit
-                                if "<tool_call>" not in content and "</tool_call>" not in content:
-                                    console.print(content, end="", markup=False)
-                                    final_text += content
-                                # If content has tool_call tags, still need to stop spinner but don't print/save
+                        # Collect + render this response as Markdown; capture any
+                        # further tool calls so the while loop can run another round.
+                        next_text, tool_calls = self._stream_assistant_text(
+                            final_stream, spinner_live=final_live
+                        )
 
                         # Make sure spinner is stopped
                         if final_live.is_started:
                             final_live.stop()
 
-                        console.print()  # Newline
+                    if next_text:
+                        console.print()  # Newline after any text
 
-                        # Add final response if not interrupted
-                        if final_text and not self.interrupted:
-                            self.conversation_history.append(
-                                {"role": "assistant", "content": final_text}
-                            )
+                    # Record this response (with any further tool calls) in history
+                    assistant_message = {"role": "assistant", "content": next_text}
+                    if tool_calls:
+                        assistant_message["tool_calls"] = tool_calls
+                    self.conversation_history.append(assistant_message)
+
+                    # If interrupted mid-stream, stop here
+                    if self.interrupted:
+                        if old_handler:
+                            signal.signal(signal.SIGINT, old_handler)
+                        return False
+
+                    # If tool_calls is set, the while loop runs another round.
+
+                if tool_calls and rounds >= self.MAX_TOOL_ROUNDS:
+                    console.print(
+                        f"[yellow]⚠️  Stopped after {self.MAX_TOOL_ROUNDS} tool rounds "
+                        "(possible loop). The model may not have finished.[/yellow]"
+                    )
 
                 # Restore original handler at the very end
                 if old_handler:

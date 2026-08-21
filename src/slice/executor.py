@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.formatted_text import HTML
 
@@ -110,19 +109,14 @@ class CommandExecutor:
             output = result.stdout.strip()
             error = result.stderr.strip()
 
-            # Show result
+            # Show result. We intentionally do NOT print the command's output/error
+            # back to the terminal: the model receives the full output (see the
+            # return dict below) and presents it, so echoing a raw panel here just
+            # duplicates what the model says. Only the status line is shown.
             if success:
                 self.console.print("[green]✓ Command completed successfully[/green]")
-                if output:
-                    # Use Text() to prevent Rich from interpreting brackets as markup
-                    output_text = Text(output)
-                    self.console.print(Panel(output_text, title="Output", border_style="green"))
             else:
                 self.console.print(f"[red]✗ Command failed (exit code: {result.returncode})[/red]")
-                if error:
-                    # Use Text() to prevent Rich from interpreting brackets as markup
-                    error_text = Text(error)
-                    self.console.print(Panel(error_text, title="Error", border_style="red"))
 
             self.console.print()  # Blank line
 
