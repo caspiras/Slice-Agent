@@ -8,7 +8,7 @@ Skills are predefined instruction sets that you can invoke with slash commands (
 
 ## How to Use Skills
 
-1. **Place skill files in this directory** (`slice-skills/`)
+1. **Place skill files in this directory** (`skills/`)
 2. **Name them with `.md` extension** (e.g., `my-skill.md`)
 3. **Invoke them in Slice** by typing `/skill-name`
 

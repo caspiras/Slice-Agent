@@ -20,9 +20,9 @@ class Skill:
 
 
 class SkillLoader:
-    """Loads and manages skills from the slice-skills/ directory."""
+    """Loads and manages skills from the skills/ directory."""
 
-    SKILLS_DIR = "slice-skills"
+    SKILLS_DIR = "skills"
 
     def __init__(self, working_directory: str):
         self.working_directory = working_directory
@@ -32,7 +32,7 @@ class SkillLoader:
 
     def load_skills(self) -> Dict[str, Skill]:
         """
-        Load all skills from the slice-skills/ directory.
+        Load all skills from the skills/ directory.
         Each skill is a subdirectory containing a skill.md file.
         The subdirectory name is used as the skill invocation name.
         Returns a dict mapping skill names to Skill objects.
@@ -69,7 +69,7 @@ class SkillLoader:
         ignored — the folder name is always the canonical name.
 
         Expected layout:
-        slice-skills/
+        skills/
           my-skill/
             skill.md
 

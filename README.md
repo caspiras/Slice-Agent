@@ -10,7 +10,19 @@
 
 Slice is a beautiful terminal IDE that wraps local Ollama models with practical coding tools. Built with **Python** and the **Rich** library, it provides streaming chat, code editing with diffs, document operations, and git integration - all sandboxed to your project directory.
 
-## 🆕 What's New in v1.6.0
+## 🆕 What's New in v1.6.1
+
+- **📁 Simpler Skills Folder** - The skills directory is now just `skills/` (renamed from `slice-skills/`)
+  - Makes skills discoverable by other tools/harnesses that expect a conventional `skills/` folder
+  - Folder-per-skill layout is unchanged (each skill is `skills/<name>/skill.md`)
+- **🔓 Less Intrusive Permissions** - Commands inside your working directory now run without prompting
+  - You're only warned/asked when a command tries to **escape** the folder Slice was started in
+  - Accessing subfolders of your project no longer triggers a permission prompt
+  - Code edits (`edit_code`) still show a diff for your approval
+
+### Previous Updates
+
+### v1.6.0
 
 - **📋 Project Instructions (SLICE.md)** - Give the model persistent, project-specific guidance
   - Create a `SLICE.md` file in your project directory with standing instructions
@@ -23,22 +35,20 @@ Slice is a beautiful terminal IDE that wraps local Ollama models with practical 
   - Permission-gated like every other action; HTTP and HTTPS supported
 - **🔒 Local-first** - Uses Python's standard library for fetching (no heavy new dependencies)
 
-### Previous Updates
-
 ### v1.5.1
 
 - **📁 Folder-Based Skills** - Skills now use a folder-per-skill layout
-  - Each skill is a folder inside `slice-skills/` containing a `skill.md` file
-  - Folder name = invocation name (e.g., `slice-skills/deploy/skill.md` → `/deploy`)
+  - Each skill is a folder inside `skills/` containing a `skill.md` file
+  - Folder name = invocation name (e.g., `skills/deploy/skill.md` → `/deploy`)
   - Example skills included: `/test`, `/hello`, `/git-status`
 - **🐛 Bug Fix** - Skills now persist when switching models with `/model`
 
 ### v1.5.0
 
 - **🎯 Skills System** - Create custom slash commands with predefined instructions
-  - Define skills in `slice-skills/` directory
+  - Define skills in `skills/` directory
   - Invoke with `/skill-name` for common workflows
-  - Full documentation in `slice-skills/README.md`
+  - Full documentation in `skills/README.md`
 
 ### v1.4.0
 
@@ -174,12 +184,12 @@ Skills are instruction sets stored in markdown files that you can invoke with `/
 
 **Create your own skills:**
 
-1. Create a `slice-skills/` directory in your project
+1. Create a `skills/` directory in your project
 2. Create a folder for your skill (the folder name becomes the command)
 3. Add a `skill.md` file inside with this format:
 
 ```
-slice-skills/
+skills/
 └── deploy/
     └── skill.md
 ```
@@ -384,7 +394,7 @@ slice_agent/
 │   ├── executor.py          # Command executor & sandboxing
 │   ├── document_reader.py   # PDF/Word/Excel/CSV reading
 │   └── document_writer.py   # Document writing operations
-├── slice-skills/            # Custom slash commands (optional)
+├── skills/                  # Custom slash commands (optional)
 │   ├── README.md            # Skills documentation
 │   └── <skill-name>/       # One folder per skill
 │       └── skill.md         # Skill definition file
@@ -420,8 +430,8 @@ ruff check src/
 
 - 🎯 **Skills System**
   - Create custom slash commands with predefined instructions
-  - Each skill is a folder inside `slice-skills/` containing a `skill.md` file
-  - Folder name = invocation name (e.g., `slice-skills/deploy/skill.md` → `/deploy`)
+  - Each skill is a folder inside `skills/` containing a `skill.md` file
+  - Folder name = invocation name (e.g., `skills/deploy/skill.md` → `/deploy`)
   - Invoke with `/skill-name` for common workflows
   - Example skills included: `/hello`, `/test`, `/git-status`
 

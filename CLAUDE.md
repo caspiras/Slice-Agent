@@ -23,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 5. **document_reader.py** - Read PDF, Word, Excel, PowerPoint, CSV, text files
 6. **document_writer.py** - Write Word, Excel, PowerPoint, PDF, CSV, text files with operations
 7. **convert_helpers.py** - Standalone Python conversion scripts (as strings). NOTE: currently **not imported anywhere** — the live conversion logic is duplicated in-process inside `chat.py` (`_convert_*` methods). Treat this file as dead/reference code unless you wire it up.
-8. **skills.py** - SkillLoader/Skill: discover and parse folder-based custom slash commands from `slice-skills/`
+8. **skills.py** - SkillLoader/Skill: discover and parse folder-based custom slash commands from `skills/`
 
 ### Project Structure
 
@@ -38,9 +38,9 @@ slice/
 │   ├── document_writer.py   # Multi-format document writing (~567 lines)
 │   ├── convert_helpers.py   # File→JSON conversion scripts (~139 lines)
 │   └── skills.py            # Skill loader & parser (~130 lines)
-├── slice-skills/            # Optional user-defined slash commands (one folder per skill)
+├── skills/                  # Optional user-defined slash commands (one folder per skill)
 │   └── <skill-name>/skill.md
-├── pyproject.toml           # Python package config (v1.6.0)
+├── pyproject.toml           # Python package config (v1.6.1)
 └── README.md                # User documentation
 ```
 
@@ -66,12 +66,13 @@ ruff check src/
 
 ### 1. Permission-Gated Actions
 
-**Core principle:** Always ask permission before executing actions.
+**Core principle:** Ask permission only when attempting to escape the sandboxed directory.
 
 - **Chat responses** flow naturally without interruption
-- **Tool calls** (bash, edit_code, write_document) trigger permission prompts
-- User sees the command/operation and context before approval
-- Never execute actions silently
+- **Commands within the sandbox** execute automatically without prompts
+- **Sandbox escape attempts** (accessing outside the working directory) trigger red warnings requiring explicit "yes" confirmation
+- **Code edits** (edit_code tool) still show diffs and require approval before applying changes
+- User sees full context for any operation that requires permission
 
 ### 2. Tool-Based Model Interaction
 
@@ -140,10 +141,11 @@ All operations are restricted to the directory where `slice` was started.
 # In chat.py, ChatSession._execute_command()
 1. Model calls bash tool with command string
 2. ChatSession passes to CommandExecutor.execute_with_permission()
-3. CommandExecutor shows permission prompt with context
-4. User approves/denies
-5. If approved: subprocess runs with 30s timeout in safe_directory
-6. Result returned to model
+3. CommandExecutor checks for sandbox escape attempts
+4. If trying to escape sandbox: shows red warning and requires explicit "yes" confirmation
+5. If staying within safe_directory: executes automatically without prompt
+6. Subprocess runs with 30s timeout in safe_directory
+7. Result returned to model
 ```
 
 ### Read Document Tool
@@ -292,7 +294,7 @@ project-specific guidance (its analogue to this CLAUDE.md, but for the Ollama mo
 Skills let users define reusable instruction sets invoked as `/skill-name`.
 
 **Discovery & format (`skills.py`):**
-- `SkillLoader(working_directory)` scans `<safe_dir>/slice-skills/` at startup (in `main.py`)
+- `SkillLoader(working_directory)` scans `<safe_dir>/skills/` at startup (in `main.py`)
 - **Folder-per-skill layout:** each skill is a subdirectory containing a `skill.md`; the *folder name* is the canonical invocation name. A `name:` field in frontmatter is **ignored** (only the folder name counts).
 - `skill.md` requires YAML-ish frontmatter (`---` delimited) with a required `description:` and non-empty instructions below the closing `---`. Any other frontmatter key lands in `metadata`.
 - A malformed skill logs a warning and is skipped — it never aborts startup.
@@ -304,7 +306,7 @@ Skills let users define reusable instruction sets invoked as `/skill-name`.
 
 **Where skills surface in the UI:** `ChatUI.run()` prints the available `/skill` names on startup when `skill_loader.has_skills()`.
 
-> Note: the top-level `slice-skills/README.md` still documents the older flat `my-skill.md` layout; the code (and repo's example skills) use the folder-per-skill layout. Prefer the code's behavior.
+> Note: the top-level `skills/README.md` still documents the older flat `my-skill.md` layout; the code (and repo's example skills) use the folder-per-skill layout. Prefer the code's behavior.
 
 ## System Message Guidelines
 
@@ -374,9 +376,10 @@ ollama pull llama3.1
    - Don't override the signal handler in other modules
 
 2. **Don't suppress chat flow**
-   - Permission prompts are for **actions only** (bash, edit_code, write_document)
-   - Chat responses must stream naturally without interruption
-   - Never prompt for permission on read_document
+   - Permission prompts ONLY appear when trying to **escape the sandbox**
+   - Commands within the safe directory execute automatically without prompts
+   - Code edits (edit_code) still show diffs and require approval
+   - Chat responses and read_document operations flow without interruption
 
 3. **Conversation history**
    - Maintained in `ChatSession.conversation_history`
@@ -431,19 +434,24 @@ ruff>=0.1.0               # Linter (line-length 100)
 
 ## Version History
 
-- **v1.6.0** - Current version, project instructions & web access
+- **v1.6.1** - Current version, streamlined skills & sandbox permissions
+  - Skills directory renamed from `slice-skills/` to `skills/` (so other harnesses can discover it); folder-per-skill layout unchanged
+  - Sandbox permissions relaxed: commands that stay within the working directory now execute without a prompt; the permission prompt appears **only** on sandbox-escape attempts (absolute paths, `~`, parent traversal, `cd` outside). `edit_code` still shows a diff for approval
+  - Fixed stale `__version__` in `src/slice/__init__.py` (was `1.3.0`)
+
+- **v1.6.0** - Project instructions & web access
   - `SLICE.md` auto-loaded per-project instructions (injected as a system message on session start; persists across `/model`)
   - New `fetch_url` tool: permission-gated web page fetching via stdlib `urllib` (HTTPS uses `certifi` CA bundle; HTML stripped to text)
   - Added `certifi` dependency (fixes macOS python.org `CERTIFICATE_VERIFY_FAILED` on HTTPS)
   - Startup hint to create a `SLICE.md` when none is present
 
 - **v1.5.1** - Folder-based skills structure
-  - Skills moved from flat `slice-skills/<name>.md` to folder-per-skill `slice-skills/<name>/skill.md`
+  - Skills moved from flat `skills/<name>.md` to folder-per-skill `skills/<name>/skill.md`
   - Folder name is the canonical invocation name (frontmatter `name:` ignored)
   - Bug fix: skills now persist across `/model` switches (skill_loader passed to new ChatSession)
 
 - **v1.5.0** - Skills system
-  - Custom `/slash` commands defined in `slice-skills/` (SkillLoader in `skills.py`)
+  - Custom `/slash` commands defined in `skills/` (SkillLoader in `skills.py`)
   - Example skills: `/hello`, `/test`, `/git-status`
 
 - **v1.4.0** - Enhanced model behavior for tool calling

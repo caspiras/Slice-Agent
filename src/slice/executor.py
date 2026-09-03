@@ -36,27 +36,26 @@ class CommandExecutor:
         Returns:
             Dict with 'success', 'output', 'error', 'cancelled' keys
         """
-        # Show what will be executed
-        self.console.print("\n[bold yellow]🔧 Action Requested[/bold yellow]")
-        if context:
-            self.console.print(f"[dim]{context}[/dim]")
-
-        # Check for dangerous patterns
-        is_safe, danger_msg = self.is_safe_command(command)
-
         # Check for sandbox escape
         escapes_sandbox, suspicious_paths = self.check_sandbox_escape(command)
 
-        # Display the command with appropriate border color
-        border_color = "red" if not is_safe or escapes_sandbox else "yellow"
-        # Show command in plain black text (no syntax highlighting)
-        self.console.print(Panel(command, title="Command", border_style=border_color))
-
-        # Show warnings
-        if not is_safe:
-            self.console.print(f"[bold red]⚠️  DANGER: {danger_msg}[/bold red]")
-
+        # Only show warnings and ask permission if trying to escape the sandbox
         if escapes_sandbox:
+            # Show what will be executed
+            self.console.print("\n[bold yellow]🔧 Action Requested[/bold yellow]")
+            if context:
+                self.console.print(f"[dim]{context}[/dim]")
+
+            # Check for dangerous patterns (for enhanced warning)
+            is_safe, danger_msg = self.is_safe_command(command)
+
+            # Display the command with red border
+            self.console.print(Panel(command, title="Command", border_style="red"))
+
+            # Show warnings
+            if not is_safe:
+                self.console.print(f"[bold red]⚠️  DANGER: {danger_msg}[/bold red]")
+
             self.console.print("[bold red]⚠️  SANDBOX ESCAPE DETECTED[/bold red]")
             self.console.print(
                 f"[red]This command tries to access paths outside: {self.safe_directory}[/red]"
@@ -66,31 +65,24 @@ class CommandExecutor:
                 self.console.print(f"  [red]• {path}[/red]")
             self.console.print()
 
-        # Ask for permission using prompt_toolkit (works better with Live displays)
-        try:
-            if escapes_sandbox or not is_safe:
+            # Ask for permission using prompt_toolkit (works better with Live displays)
+            try:
                 prompt_text = HTML(
                     "<red><b>⚠️  Are you SURE you want to execute this? (yes/N): </b></red>"
                 )
-                # Require explicit "yes" for dangerous/escaped commands
+                # Require explicit "yes" for escaped commands
                 response = pt_prompt(prompt_text, default="").strip().lower()
                 if response != "yes":
                     self.console.print("[dim]Action cancelled by user[/dim]\n")
                     return {"success": False, "output": "", "error": "", "cancelled": True}
-            else:
-                # Normal permission prompt
-                response = (
-                    pt_prompt(HTML("<red>Execute this command? (y/N): </red>"), default="")
-                    .strip()
-                    .lower()
-                )
-
-                if response not in ("y", "yes"):
-                    self.console.print("[dim]Action cancelled by user[/dim]\n")
-                    return {"success": False, "output": "", "error": "", "cancelled": True}
-        except (KeyboardInterrupt, EOFError):
-            self.console.print("\n[dim]Action cancelled by user[/dim]\n")
-            return {"success": False, "output": "", "error": "", "cancelled": True}
+            except (KeyboardInterrupt, EOFError):
+                self.console.print("\n[dim]Action cancelled by user[/dim]\n")
+                return {"success": False, "output": "", "error": "", "cancelled": True}
+        else:
+            # Command is within sandbox - execute without prompting
+            # Optionally show a brief execution notice
+            if context:
+                self.console.print(f"\n[dim]🔧 {context}[/dim]")
 
         # Execute the command
         try:

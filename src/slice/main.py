@@ -38,7 +38,7 @@ def main():
 █████▀ ██▄▄▄ ██ ▀████ ██▄▄▄
                                 [/bold cyan]""")
     console.print("[cyan]" + "─" * 64 + "[/cyan]")
-    console.print("[cyan]v1.6.0 - Project Instructions & Web Access[/cyan]")
+    console.print("[cyan]v1.6.1 - Streamlined skills & sandbox permissions[/cyan]")
     console.print()
     console.print("[cyan]💡 Tips:[/cyan]")
     console.print("[cyan]  • Type /model to switch models during your session[/cyan]")
@@ -63,7 +63,7 @@ def main():
     # Initialize chat session with selected model
     safe_dir = os.getcwd()
 
-    # Load skills from slice-skills/ directory
+    # Load skills from skills/ directory
     skill_loader = SkillLoader(safe_dir)
     loaded_skills = skill_loader.load_skills()
 
